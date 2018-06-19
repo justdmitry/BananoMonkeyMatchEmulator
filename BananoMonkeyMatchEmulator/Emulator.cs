@@ -1,89 +1,128 @@
 ﻿namespace BananoMonkeyMatchEmulator
 {
     using System;
-    using System.Collections.Generic;
     using System.Diagnostics;
     using System.Drawing;
-    using System.IO;
     using System.Linq;
     using System.Net;
     using System.Net.Http;
     using System.Net.Http.Headers;
     using System.Threading.Tasks;
     using Microsoft.Extensions.Logging;
-    using Microsoft.Extensions.Options;
     using Newtonsoft.Json;
 
-    public class Emulator : IEmulator
+    public class Emulator
     {
-        private readonly Random rand = new Random();
+        private const string Server = "https://bananosecure.coranos.io/";
+
+        private static readonly Random Rand = new Random();
+
+        private static HttpClient secondaryHttpClient;
+
+        private readonly Humanizator humanizator;
 
         private readonly ILogger logger;
 
-        private readonly HttpClient httpClient;
-
-        private readonly HttpClient httpClient2;
-
-        private readonly EmulatorOptions options;
-
-        private readonly HashSet<string> knownImages = new HashSet<string>();
+        private HttpClient mainHttpClient;
 
         private int nextAnswer = 0;
 
-        public Emulator(IOptions<EmulatorOptions> options, ILogger<Emulator> logger)
-        {
-            this.options = options.Value;
-            this.logger = logger;
+        private int exceptionsCount = 0;
 
-            var uri = new Uri(options.Value.Website);
+        public Emulator(ILogger<Emulator> logger, Humanizator humanizator)
+        {
+            this.logger = logger;
+            this.humanizator = humanizator;
+        }
+
+        public string Wallet { get; private set; }
+
+        public string Discord { get; private set; }
+
+        public async Task RunAsync(string wallet, string discord, bool asHuman)
+        {
+            logger.LogInformation($"Starting for {wallet} of {discord} (human: {asHuman})");
+
+            Wallet = wallet;
+            Discord = discord;
 
             var handler = new HttpClientHandler()
             {
                 AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
             };
-            this.httpClient = new HttpClient(handler) { BaseAddress = uri };
-            this.httpClient.DefaultRequestHeaders.Accept.TryParseAdd("application/json, text/javascript, */*; q=0.01");
-            this.httpClient.DefaultRequestHeaders.AcceptEncoding.TryParseAdd("gzip, deflate, br");
-            this.httpClient.DefaultRequestHeaders.AcceptLanguage.TryParseAdd("ru,ru-RU;q=0.8,en;q=0.5,en-US;q=0.3");
-            this.httpClient.DefaultRequestHeaders.CacheControl = CacheControlHeaderValue.Parse("no-cache");
-            ////this.httpClient.DefaultRequestHeaders.Connection.TryParseAdd("keep-alive");
-            this.httpClient.DefaultRequestHeaders.Add("DNT", "1");
-            this.httpClient.DefaultRequestHeaders.Host = uri.Host;
-            this.httpClient.DefaultRequestHeaders.Pragma.TryParseAdd("no-cache");
-            this.httpClient.DefaultRequestHeaders.Referrer = uri;
-            this.httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:60.0) Gecko/20100101 Firefox/60.0");
-            this.httpClient.DefaultRequestHeaders.Add("X-Requested-With", "XMLHttpRequest");
 
-            var handler2 = new HttpClientHandler()
+            var uri = new Uri(Server);
+
+            mainHttpClient = new HttpClient(handler) { BaseAddress = uri };
+            mainHttpClient.DefaultRequestHeaders.Accept.TryParseAdd("application/json, text/javascript, */*; q=0.01");
+            mainHttpClient.DefaultRequestHeaders.AcceptEncoding.TryParseAdd("gzip, deflate, br");
+            mainHttpClient.DefaultRequestHeaders.AcceptLanguage.TryParseAdd("ru,ru-RU;q=0.8,en;q=0.5,en-US;q=0.3");
+            mainHttpClient.DefaultRequestHeaders.CacheControl = CacheControlHeaderValue.Parse("no-cache");
+            mainHttpClient.DefaultRequestHeaders.Connection.TryParseAdd("close");
+            mainHttpClient.DefaultRequestHeaders.Add("DNT", "1");
+            mainHttpClient.DefaultRequestHeaders.Host = uri.Host;
+            mainHttpClient.DefaultRequestHeaders.Pragma.TryParseAdd("no-cache");
+            mainHttpClient.DefaultRequestHeaders.Referrer = uri;
+            mainHttpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:60.0) Gecko/20100101 Firefox/60.0");
+            mainHttpClient.DefaultRequestHeaders.Add("X-Requested-With", "XMLHttpRequest");
+
+            if (secondaryHttpClient == null)
             {
-                AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
-            };
-            this.httpClient2 = new HttpClient(handler2);
-            this.httpClient2.DefaultRequestHeaders.AcceptEncoding.TryParseAdd("gzip, deflate, br");
+                var handler2 = new HttpClientHandler()
+                {
+                    AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+                    MaxConnectionsPerServer = 10,
+                };
+
+                secondaryHttpClient = new HttpClient(handler2);
+                secondaryHttpClient.DefaultRequestHeaders.AcceptEncoding.TryParseAdd("gzip, deflate, br");
+            }
+
+            humanizator.Start(asHuman);
+            while (true)
+            {
+                try
+                {
+                    await PlayAsync();
+                    break;
+                }
+                catch (HttpRequestException ex)
+                {
+                    exceptionsCount++;
+                    if (exceptionsCount > 10)
+                    {
+                        throw;
+                    }
+                    else if (exceptionsCount < 5)
+                    {
+                        logger.LogWarning("Exception: " + ex.Message);
+                        await Task.Delay(TimeSpan.FromSeconds(exceptionsCount));
+                    }
+                    else
+                    {
+                        logger.LogWarning("Exception: " + ex.Message);
+                        await Task.Delay(TimeSpan.FromSeconds(30));
+                    }
+                }
+            }
+
+            logger.LogInformation("Completed.");
         }
 
-        public int ExceptionCount { get; set; }
-
-        public async Task RunAsync()
+        public async Task PlayAsync()
         {
-            logger.LogInformation("Starting...");
-
             var wins = -999;
             var oopsCount = 0;
+
             var roundTimer = Stopwatch.StartNew();
-            var playTimer = Stopwatch.StartNew();
-            var toPlay = TimeSpan.FromMinutes(rand.Next(60, 120));
+            var failNextRound = false;
 
             while (true)
             {
-                if (playTimer.Elapsed > toPlay)
+                if (failNextRound)
                 {
-                    var rest = TimeSpan.FromMinutes(rand.Next(10, 30));
-                    logger.LogInformation("Playing too long. Let's have a rest for " + rest);
-                    await Task.Delay(rest);
-                    toPlay = TimeSpan.FromMinutes(rand.Next(60, 120));
-                    logger.LogInformation("Next rest after " + toPlay);
-                    playTimer.Restart();
+                    nextAnswer = Rand.Next(0, 15);
+                    logger.LogWarning("Will (try to) fail this round (thanks Humanizator)");
                 }
 
                 var newTask = await SendChoiceAsync(nextAnswer);
@@ -92,7 +131,7 @@
                     break;
                 }
 
-                this.ExceptionCount = 0;
+                exceptionsCount = 0;
                 roundTimer.Restart();
 
                 if (newTask.wins <= wins)
@@ -104,6 +143,10 @@
                         logger.LogCritical("STOPPING.");
                         break;
                     }
+                }
+                else
+                {
+                    oopsCount = 0;
                 }
 
                 wins = newTask.wins;
@@ -121,8 +164,8 @@
                 var matchR = await FindMatchAsync(newTask.prefix, r.First(), r.Skip(1).ToArray());
                 nextAnswer = matchL + (4 * matchR);
 
-                var minimumDelay = TimeSpan.FromMilliseconds(1000 + rand.Next(500, 3000));
-                var actualDelay = minimumDelay - roundTimer.Elapsed;
+                humanizator.WhatNext(newTask.wins, out var delay, out failNextRound);
+                var actualDelay = delay - roundTimer.Elapsed;
                 if (actualDelay > TimeSpan.Zero)
                 {
                     await Task.Delay(actualDelay);
@@ -132,13 +175,13 @@
 
         public async Task<ServerResponse> SendChoiceAsync(int answer)
         {
-            var url = $"/game.json?account={options.Wallet}&choice={answer}&discord={options.Discord}&bot=maybe".Split('#')[0];
+            var url = $"/game.json?account={Wallet}&choice={answer}&discord={Discord}&bot=maybe".Split('#')[0];
 
             logger.LogDebug("Sending: " + url);
 
             using (var req = new HttpRequestMessage(HttpMethod.Get, url))
             {
-                using (var resp = await httpClient.SendAsync(req))
+                using (var resp = await mainHttpClient.SendAsync(req))
                 {
                     resp.EnsureSuccessStatusCode();
                     var respText = await resp.Content.ReadAsStringAsync();
@@ -169,18 +212,18 @@
             var l = new[]
                 {
                     response.expected.L,
-                    response.choices[new[] { 0, 4, 8, 12 }[rand.Next(0, 3)]].L,
-                    response.choices[new[] { 1, 5, 9, 13 }[rand.Next(0, 3)]].L,
-                    response.choices[new[] { 2, 6, 10, 14 }[rand.Next(0, 3)]].L,
-                    response.choices[new[] { 3, 7, 11, 15 }[rand.Next(0, 3)]].L,
+                    response.choices[new[] { 0, 4, 8, 12 }[Rand.Next(0, 3)]].L,
+                    response.choices[new[] { 1, 5, 9, 13 }[Rand.Next(0, 3)]].L,
+                    response.choices[new[] { 2, 6, 10, 14 }[Rand.Next(0, 3)]].L,
+                    response.choices[new[] { 3, 7, 11, 15 }[Rand.Next(0, 3)]].L,
                 };
             var r = new[]
                 {
                     response.expected.R,
-                    response.choices[new[] { 0, 1, 2, 3 }[rand.Next(0, 3)]].R,
-                    response.choices[new[] { 4, 5, 6, 7 }[rand.Next(0, 3)]].R,
-                    response.choices[new[] { 8, 9, 10, 11 }[rand.Next(0, 3)]].R,
-                    response.choices[new[] { 12, 13, 14, 15 }[rand.Next(0, 3)]].R,
+                    response.choices[new[] { 0, 1, 2, 3 }[Rand.Next(0, 3)]].R,
+                    response.choices[new[] { 4, 5, 6, 7 }[Rand.Next(0, 3)]].R,
+                    response.choices[new[] { 8, 9, 10, 11 }[Rand.Next(0, 3)]].R,
+                    response.choices[new[] { 12, 13, 14, 15 }[Rand.Next(0, 3)]].R,
                 };
             return (l, r);
 #pragma warning restore SA1013
@@ -189,15 +232,14 @@
         public async Task<int> FindMatchAsync(string prefix, string expected, string[] candidates)
         {
             var url = prefix + expected;
-            using (var img = Image.FromStream(await httpClient2.GetStreamAsync(prefix + expected)))
+            using (var img = Image.FromStream(await secondaryHttpClient.GetStreamAsync(prefix + expected)))
             {
                 for (var i = 0; i < candidates.Length; i++)
                 {
-                    using (var cand = Image.FromStream(await httpClient2.GetStreamAsync(prefix + candidates[i])))
+                    using (var cand = Image.FromStream(await secondaryHttpClient.GetStreamAsync(prefix + candidates[i])))
                     {
-                        var ratio = CompareImages(img, cand);
-                        var match = ratio > 0.95;
-                        logger.LogDebug($"Compare {expected} with {candidates[i]}: {ratio}{(match ? " MATCH" : string.Empty)}");
+                        var match = ImageComparer.AreEqual(img, cand, out var similarity);
+                        logger.LogDebug($"Compare {expected} with {candidates[i]}: {similarity}{(match ? " MATCH" : string.Empty)}");
                         if (match)
                         {
                             return i;
@@ -207,35 +249,6 @@
             }
 
             return -1;
-        }
-
-        public float CompareImages(Image firstImage, Image secondImage)
-        {
-            float equal = 0;
-            float diff = 0;
-            using (var firstBitmap = new Bitmap(firstImage))
-            {
-                using (var secondBitmap = new Bitmap(secondImage))
-                {
-                    for (var i = 0; i < firstBitmap.Width; i++)
-                    {
-                        for (var j = 0; j < firstBitmap.Height; j++)
-                        {
-                            var eq = firstBitmap.GetPixel(i, j) == secondBitmap.GetPixel(i, j);
-                            if (eq)
-                            {
-                                equal++;
-                            }
-                            else
-                            {
-                                diff++;
-                            }
-                        }
-                    }
-                }
-            }
-
-            return equal / (diff + equal);
         }
 
 #pragma warning disable SA1300

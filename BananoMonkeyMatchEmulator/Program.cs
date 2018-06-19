@@ -1,7 +1,6 @@
 ﻿namespace BananoMonkeyMatchEmulator
 {
     using System;
-    using System.Net.Http;
     using System.Threading.Tasks;
     using Microsoft.Extensions.Configuration;
     using Microsoft.Extensions.DependencyInjection;
@@ -28,43 +27,20 @@
             var services = new ServiceCollection()
                 .AddSingleton<IConfiguration>(config)
                 .AddLogging(lb => lb.AddSerilog(dispose: true))
-                .Configure<EmulatorOptions>(config.GetSection("Emulator"))
-                .AddSingleton<IEmulator, Emulator>()
+                .AddTransient<Humanizator>()
+                .AddTransient<Emulator>()
                 .BuildServiceProvider();
 
             var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger("Program");
 
-            var emulator = services.GetRequiredService<IEmulator>();
-            logger.LogInformation("IEmulator created: " + emulator.GetType().Name);
+            var wallet = config["Wallet"];
+            var discord = config["Discord"];
 
-            while (true)
-            {
-                try
-                {
-                    await emulator.RunAsync();
-                    break;
-                }
-                catch (HttpRequestException ex)
-                {
-                    emulator.ExceptionCount++;
-                    if (emulator.ExceptionCount > 10)
-                    {
-                        throw;
-                    }
-                    else if (emulator.ExceptionCount < 5)
-                    {
-                        logger.LogWarning("Exception: " + ex.Message);
-                        await Task.Delay(TimeSpan.FromSeconds(emulator.ExceptionCount));
-                    }
-                    else
-                    {
-                        logger.LogWarning("Exception: " + ex.Message);
-                        await Task.Delay(TimeSpan.FromSeconds(30));
-                    }
-                }
-            }
+            logger.LogInformation($"Wallet '{wallet}', Discord '{discord}'");
 
-            logger.LogWarning("Emulator stopped.");
+            var emulator = services.GetRequiredService<Emulator>();
+
+            await emulator.RunAsync(wallet, discord, true);
         }
     }
 }
