@@ -2,12 +2,12 @@
 
 Emulator/bot for Banano monKey Match game.
 
-Successfully earned 10K bananos during first game day at Jun 16, 2018.
+Successfully earned 10K bananos during first game day at Jun 16, 2018 (tag `v1.0`)
 
-### Requiremenets
 
-* Microsoft .NET Framework 4.7 (possibly lower, try change `TargetFramework`)
-* dotnet-core SDK (for `dotnet run` command)
+### Requirements
+
+* Microsoft .NET Core 2.1 (but runs on Windows only - uses System.Drawing.Compat)
 
 
 ### Configuration
